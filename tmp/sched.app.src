@@ -1,0 +1,10 @@
+{application, sched,
+ [
+  {description,
+   "Controllable runtime scheduler that can automatically instrument, record and replay traces."},
+  {vsn, "1"},
+  {registered, [sched_server]},
+  {applications, [kernel, stdlib]},
+  {mod, {sched_app, []}},
+  {env, []}
+ ]}.

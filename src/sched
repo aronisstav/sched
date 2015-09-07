@@ -1,0 +1,10 @@
+#!/usr/bin/env escript
+%% -*- erlang-indent-level: 2 -*-
+%%! +S1 -noshell -pa . -pa ebin
+
+main(_Args) ->
+  ScriptDir = filename:dirname(escript:script_name()),
+  EbinDir = filename:join([ScriptDir,"ebin"]),
+  ok = code:add_pathsa([EbinDir]),
+  sched_tests:sched_proper_sample(),
+  init:stop().

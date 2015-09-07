@@ -1,0 +1,9 @@
+deps
+ebin
+erl_crash.dump
+*.beam
+*_plt
+
+sched
+!src/sched
+sched_version.hrl
