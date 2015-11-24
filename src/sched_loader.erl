@@ -46,6 +46,7 @@ load(Module) ->
   case Which =:= ?instrumented_tag of
     true -> ok;
     false ->
+      erlang:display({?MODULE, Module}),
       Beam =
         case Which =:= preloaded of
           true ->
@@ -53,7 +54,12 @@ load(Module) ->
             BeamBinary;
           false -> Which
         end,
-      load_binary(Module, Beam)
+      try
+        load_binary(Module, Beam)
+      catch
+        throw:has_node_1 ->
+          ?ERROR({cannot_instrument_node_1, Module})
+      end
   end.
 
 %%%-----------------------------------------------------------------------------
@@ -110,14 +116,27 @@ get_core(Beam) ->
 %%-spec instrument(module(), cerl:cerl()) -> cerl:cerl().
 
 instrument(Current, CoreCode) ->
-  {R, {Current, _}} = cerl_trees:mapfold(fun mapfold/2, {Current, 1}, CoreCode),
+  {R, {Current, _}} =
+    my_cerl_trees:mapfold(fun pre/2, fun post/2, {Current, {[], 1}}, CoreCode),
+  %% io:format("~p~n",[R]),
   R.
 
-mapfold(Tree, {Current, Var}) ->
+pre(Tree, {Current, {SelfNodeNs, TimeoutN} = Ns}) ->
+  Type = cerl:type(Tree),
+  NewNs =
+    case Type of
+      'fun' ->
+        {[{TimeoutN, TimeoutN + 1}|SelfNodeNs], TimeoutN + 2};
+      _ ->
+        Ns
+    end,
+  {Tree, {Current, NewNs}}.
+
+post(Tree, {Current, {SelfNodeNs, TimeoutN} = Ns}) ->
   Type = cerl:type(Tree),
   NewTree =
     case Type of
-      apply ->
+      'apply' ->
         Op = cerl:apply_op(Tree),
         case cerl:is_c_fname(Op) of
           true -> Tree;
@@ -125,15 +144,36 @@ mapfold(Tree, {Current, Var}) ->
             OldArgs = cerl:make_list(cerl:apply_args(Tree)),
             inspect(apply, [Op, OldArgs], Tree)
         end;
-      call ->
+      'call' ->
         Module = cerl:call_module(Tree),
         Name = cerl:call_name(Tree),
         Args = cerl:call_args(Tree),
-        case is_safe(Module, Name, length(Args), Current) of
-          true -> Tree;
+        Arity = length(Args),
+        [{SelfN, NodeN}|_] = SelfNodeNs,
+        case is_special(Module, Name, Arity, SelfN, NodeN) of
+          {true, NTree} ->
+            NTree;
           false ->
-            inspect(call, [Module, Name, cerl:make_list(Args)], Tree)
+            case is_safe(Module, Name, length(Args), Current) of
+              true ->
+                Tree;
+              false ->
+                inspect(call, [Module, Name, cerl:make_list(Args)], Tree)
+            end
         end;
+      'fun' ->
+        Vars = cerl:fun_vars(Tree),
+        Body = cerl:fun_body(Tree),
+        [{SelfN, NodeN}|_] = SelfNodeNs,
+        [SelfVar, NodeVar] = [cerl:c_var(X) || X <- [SelfN, NodeN]],
+        [SelfCall, NodeCall] =
+          [inspect(call, [cerl:abstract(Y) || Y <- [erlang, X, []]], Tree) ||
+            X <- [self, node]],
+        WithNodeVar =
+          cerl:update_tree(Tree, 'let', [[NodeVar], [NodeCall], [Body]]),
+        WithSelfNodeVar =
+          cerl:update_tree(Tree, 'let', [[SelfVar], [SelfCall], [WithNodeVar]]),
+        cerl:update_c_fun(Tree, Vars, WithSelfNodeVar);
       'receive' ->
         Clauses = cerl:receive_clauses(Tree),
         Timeout = cerl:receive_timeout(Tree),
@@ -144,7 +184,7 @@ mapfold(Tree, {Current, Var}) ->
           false ->
             %% Replace original timeout with a fresh variable to make it
             %% skippable on demand.
-            TimeoutVar = cerl:c_var(Var),
+            TimeoutVar = cerl:c_var(TimeoutN),
             RecTree = cerl:update_c_receive(Tree, Clauses, TimeoutVar, Action),
             cerl:update_tree(Tree, 'let', [[TimeoutVar], [Call], [RecTree]]);
           true ->
@@ -155,12 +195,15 @@ mapfold(Tree, {Current, Var}) ->
         end;
       _ -> Tree
     end,
-  NewVar =
+  NewNs =
     case Type of
-      'receive' -> Var + 1;
-      _ -> Var
+      'receive' -> {SelfNodeNs, TimeoutN + 1};
+      'fun' ->
+        [_|Rest] = SelfNodeNs,
+        {Rest, TimeoutN};
+      _ -> Ns
     end,
-  {NewTree, {Current, NewVar}}.
+  {NewTree, {Current, NewNs}}.
 
 inspect(Tag, Args, Tree) ->
   CTag = cerl:c_atom(Tag),
@@ -190,6 +233,23 @@ extract_patterns([Tree|Rest], Acc) ->
   Guard = cerl:clause_guard(Tree),
   extract_patterns(Rest, [cerl:update_c_clause(Tree, Pats, Guard, Body)|Acc]).
 
+is_special(Module, Name, Arity, SelfN, NodeN) ->
+  case
+    cerl:is_literal(Module) andalso
+    cerl:is_literal(Name)
+  of
+    false -> false;
+    true ->
+      ModuleLit = cerl:concrete(Module),
+      NameLit = cerl:concrete(Name),
+      case {ModuleLit, NameLit, Arity} of
+        {erlang, self, 0} -> {true, cerl:c_var(SelfN)};
+        {erlang, node, 0} -> {true, cerl:c_var(NodeN)};
+        %% x{erlang, node, 1} -> throw(has_node_1);
+        _ -> false
+      end
+  end.
+
 is_safe(Module, Name, Arity, Current) ->
   case
     cerl:is_literal(Module) andalso
@@ -197,8 +257,8 @@ is_safe(Module, Name, Arity, Current) ->
   of
     false -> false;
     true ->
-      NameLit = cerl:concrete(Name),
       ModuleLit = cerl:concrete(Module),
+      NameLit = cerl:concrete(Name),
       %% erlang:apply/3 is safe only when called inside of erlang.erl
       case {ModuleLit, NameLit, Arity} =:= {erlang, apply, 3} of
         true -> Current =:= erlang;
