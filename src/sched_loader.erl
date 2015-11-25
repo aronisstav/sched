@@ -6,11 +6,17 @@
 
 -export([init/0, load/1, error_to_string/1]).
 
+-export_type([location/0, receive_pattern_fun()]).
+
+-include("sched.hrl").
+
 %%%=============================================================================
 
--type error_reason() :: 'cannot_instrument_wrapper'.
--type ascii_string() :: [1..255,...].
--type  module_atom() :: atom().
+-type ascii_string()        :: [1..255,...].
+-type error_reason()        :: 'cannot_instrument_wrapper'.
+-opaque location()          :: term(). %XXX: Refine?
+-type module_atom()         :: atom().
+-type receive_pattern_fun() :: fun((term()) -> boolean()).
 
 %%%=============================================================================
 
@@ -46,7 +52,7 @@ load(Module) ->
   case Which =:= ?instrumented_tag of
     true -> ok;
     false ->
-      erlang:display({?MODULE, Module}),
+      ?d({load, Module}),
       Beam =
         case Which =:= preloaded of
           true ->
@@ -54,12 +60,7 @@ load(Module) ->
             BeamBinary;
           false -> Which
         end,
-      try
-        load_binary(Module, Beam)
-      catch
-        throw:has_node_1 ->
-          ?ERROR({cannot_instrument_node_1, Module})
-      end
+      load_binary(Module, Beam)
   end.
 
 %%%-----------------------------------------------------------------------------
@@ -121,18 +122,18 @@ instrument(Current, CoreCode) ->
   %% io:format("~p~n",[R]),
   R.
 
-pre(Tree, {Current, {SelfNodeNs, TimeoutN} = Ns}) ->
+pre(Tree, {Current, {SelfNs, TimeoutN} = Ns}) ->
   Type = cerl:type(Tree),
   NewNs =
     case Type of
       'fun' ->
-        {[{TimeoutN, TimeoutN + 1}|SelfNodeNs], TimeoutN + 2};
+        {[TimeoutN|SelfNs], TimeoutN + 1};
       _ ->
         Ns
     end,
   {Tree, {Current, NewNs}}.
 
-post(Tree, {Current, {SelfNodeNs, TimeoutN} = Ns}) ->
+post(Tree, {Current, {SelfNs, TimeoutN} = Ns}) ->
   Type = cerl:type(Tree),
   NewTree =
     case Type of
@@ -148,37 +149,30 @@ post(Tree, {Current, {SelfNodeNs, TimeoutN} = Ns}) ->
         Module = cerl:call_module(Tree),
         Name = cerl:call_name(Tree),
         Args = cerl:call_args(Tree),
-        Arity = length(Args),
-        [{SelfN, NodeN}|_] = SelfNodeNs,
-        case is_special(Module, Name, Arity, SelfN, NodeN) of
-          {true, NTree} ->
-            NTree;
+        case is_safe(Module, Name, length(Args), Current) of
+          is_self ->
+            [SelfN|_] = SelfNs,
+            cerl:c_var(SelfN);
+          true ->
+            Tree;
           false ->
-            case is_safe(Module, Name, length(Args), Current) of
-              true ->
-                Tree;
-              false ->
-                inspect(call, [Module, Name, cerl:make_list(Args)], Tree)
-            end
+            inspect(call, [Module, Name, cerl:make_list(Args)], Tree)
         end;
       'fun' ->
         Vars = cerl:fun_vars(Tree),
         Body = cerl:fun_body(Tree),
-        [{SelfN, NodeN}|_] = SelfNodeNs,
-        [SelfVar, NodeVar] = [cerl:c_var(X) || X <- [SelfN, NodeN]],
-        [SelfCall, NodeCall] =
-          [inspect(call, [cerl:abstract(Y) || Y <- [erlang, X, []]], Tree) ||
-            X <- [self, node]],
-        WithNodeVar =
-          cerl:update_tree(Tree, 'let', [[NodeVar], [NodeCall], [Body]]),
-        WithSelfNodeVar =
-          cerl:update_tree(Tree, 'let', [[SelfVar], [SelfCall], [WithNodeVar]]),
-        cerl:update_c_fun(Tree, Vars, WithSelfNodeVar);
+        [SelfN|_] = SelfNs,
+        SelfVar = cerl:c_var(SelfN),
+        SelfCall =
+          inspect(call, [cerl:abstract(Y) || Y <- [erlang, self, []]], Tree),
+        WithSelfVar =
+          cerl:update_tree(Tree, 'let', [[SelfVar], [SelfCall], [Body]]),
+        cerl:update_c_fun(Tree, Vars, WithSelfVar);
       'receive' ->
         Clauses = cerl:receive_clauses(Tree),
         Timeout = cerl:receive_timeout(Tree),
         Action = cerl:receive_action(Tree),
-        Fun = receive_matching_fun(Tree),
+        Fun = receive_pattern_fun(Tree),
         Call = inspect('receive', [Fun, Timeout], Tree),
         case Timeout =:= cerl:c_atom(infinity) of
           false ->
@@ -197,9 +191,9 @@ post(Tree, {Current, {SelfNodeNs, TimeoutN} = Ns}) ->
     end,
   NewNs =
     case Type of
-      'receive' -> {SelfNodeNs, TimeoutN + 1};
+      'receive' -> {SelfNs, TimeoutN + 1};
       'fun' ->
-        [_|Rest] = SelfNodeNs,
+        [_|Rest] = SelfNs,
         {Rest, TimeoutN};
       _ -> Ns
     end,
@@ -213,7 +207,7 @@ inspect(Tag, Args, Tree) ->
                     [cerl:c_atom(inspect)],
                     [CTag, CArgs, cerl:abstract(cerl:get_ann(Tree))]]).
 
-receive_matching_fun(Tree) ->
+receive_pattern_fun(Tree) ->
   Msg = cerl:c_var(message),
   Clauses = extract_patterns(cerl:receive_clauses(Tree)),
   Body = cerl:update_tree(Tree, 'case', [[Msg], Clauses]),
@@ -233,23 +227,6 @@ extract_patterns([Tree|Rest], Acc) ->
   Guard = cerl:clause_guard(Tree),
   extract_patterns(Rest, [cerl:update_c_clause(Tree, Pats, Guard, Body)|Acc]).
 
-is_special(Module, Name, Arity, SelfN, NodeN) ->
-  case
-    cerl:is_literal(Module) andalso
-    cerl:is_literal(Name)
-  of
-    false -> false;
-    true ->
-      ModuleLit = cerl:concrete(Module),
-      NameLit = cerl:concrete(Name),
-      case {ModuleLit, NameLit, Arity} of
-        {erlang, self, 0} -> {true, cerl:c_var(SelfN)};
-        {erlang, node, 0} -> {true, cerl:c_var(NodeN)};
-        %% x{erlang, node, 1} -> throw(has_node_1);
-        _ -> false
-      end
-  end.
-
 is_safe(Module, Name, Arity, Current) ->
   case
     cerl:is_literal(Module) andalso
@@ -259,10 +236,11 @@ is_safe(Module, Name, Arity, Current) ->
     true ->
       ModuleLit = cerl:concrete(Module),
       NameLit = cerl:concrete(Name),
-      %% erlang:apply/3 is safe only when called inside of erlang.erl
-      case {ModuleLit, NameLit, Arity} =:= {erlang, apply, 3} of
-        true -> Current =:= erlang;
-        false ->
+      case {ModuleLit, NameLit, Arity} of
+        %% erlang:apply/3 is safe only when called inside of erlang.erl
+        {erlang, apply, 3} -> Current =:= erlang;
+        {erlang, self, 0} -> is_self;
+        _ ->
           case erlang:is_builtin(ModuleLit, NameLit, Arity) of
             true ->
               (ModuleLit =:= erlang

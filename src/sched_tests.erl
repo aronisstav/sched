@@ -15,5 +15,5 @@ sched_proper_sample() ->
     exit(normal)
   catch
     Class:Reason ->
-      erlang:display({ok, Class, Reason})
+      erlang:display({ok, Class, Reason, erlang:get_stacktrace()})
   end.

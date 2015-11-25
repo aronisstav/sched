@@ -32,8 +32,11 @@ VERSION_HRL=src/$(NAME)_version.hrl
 
 ###-----------------------------------------------------------------------------
 
-.PHONY: default
-default: $(NAME)
+.PHONY: default debug
+default debug: $(NAME)
+
+debug: ERL_COMPILE_FLAGS += -DDEBUG=true
+debug: VERSION := $(VERSION)-debug
 
 $(NAME): $(MODULES:%=ebin/%.beam)
 	@rm -f $@
