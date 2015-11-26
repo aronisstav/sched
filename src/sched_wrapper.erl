@@ -25,12 +25,13 @@ enable_inspect(State) ->
 
 %%%-----------------------------------------------------------------------------
 
--spec inspect(tag(), [term()], sched_event:location()) -> term().
+-spec inspect(tag(), [term()], sched_loader:annotations()) -> term().
 
-inspect(Tag, Args, Location) ->
+inspect(Tag, Args, Annotations) ->
   Simulate =
     case remove_sched_state_info() of
       {true, State} ->
+        Location = sched_loader:get_location(Annotations),
         case decide(Tag, Args, Location, State) of
           {true, Ret, NewState} ->
             add_sched_state_info(NewState),

@@ -4,17 +4,19 @@
 
 -module(sched_loader).
 
--export([init/0, load/1, error_to_string/1]).
+-export([init/0, load/1, get_location/1, error_to_string/1]).
 
--export_type([location/0, receive_pattern_fun()]).
+-export_type([annotations/0, location/0, receive_pattern_fun/0]).
 
 -include("sched.hrl").
 
 %%%=============================================================================
 
+-opaque annotations()       :: [term()]. %XXX: Refine?
+
 -type ascii_string()        :: [1..255,...].
 -type error_reason()        :: 'cannot_instrument_wrapper'.
--opaque location()          :: term(). %XXX: Refine?
+-type location()            :: [{'file', string()} | {'line', integer()}].
 -type module_atom()         :: atom().
 -type receive_pattern_fun() :: fun((term()) -> boolean()).
 
@@ -62,6 +64,13 @@ load(Module) ->
         end,
       load_binary(Module, Beam)
   end.
+
+-spec get_location(annotations()) -> location().
+
+get_location(Annotations) ->
+  File = proplists:lookup(file, Annotations),
+  [Line] = [N || N <- Annotations, is_integer(N)],
+  [File, {line, Line}].
 
 %%%-----------------------------------------------------------------------------
 

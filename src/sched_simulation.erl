@@ -80,7 +80,7 @@ simulate_mfa(MFA, Args, Location, State) ->
                 {Module, Name, _Arity} = MFA,
                 _ = (catch throw(reset_stack_here)),
                 [_|S] = erlang:get_stacktrace(),
-                erlang:raise(C, R, [{Module, Name, Args}|S])
+                erlang:raise(C, R, [{Module, Name, Args, Location}|S])
             end
         end,
       {SimFun, NewState}
