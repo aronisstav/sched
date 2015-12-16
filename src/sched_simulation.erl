@@ -20,9 +20,9 @@
 %%%=============================================================================
 
 -record(state, {
-          infinity_after = infinity    :: timeout(),
-          messages       = queue:new() :: message_queue(),
-          self           = self()      :: pid()
+          timeout_limit = infinity    :: timeout(),
+          messages      = queue:new() :: message_queue(),
+          self          = self()      :: pid()
          }).
 
 -opaque state() :: #state{}.
@@ -70,7 +70,7 @@ simulate_mfa(MFA, Args, Location, State) ->
           Class:Reason ->
             {{raise, Class, Reason}, UpdatedState}
         end,
-      report_event(MFA, Args, Result, Location, NewState),
+      report_mfa_event(MFA, Args, Result, Location, NewState),
       SimFun =
         case Result of
           {ok, V} ->
@@ -91,7 +91,7 @@ simulate_mfa(MFA, Args, Location, State) ->
 
 simulate_receive(_PatternFun, Timeout, _Location, State) ->
   _RealTimeout =
-    case Timeout >= State#state.infinity_after of
+    case Timeout >= State#state.timeout_limit of
       false -> Timeout;
       true -> infinity
     end,
@@ -125,9 +125,8 @@ mfa(MFA, Args, State) ->
 %%%=============================================================================
 
 wait_signal(State) ->
-
   State.
 
-report_event(_MFA, _Args, _Result, _Location, _State) ->
+report_mfa_event(_MFA, _Args, _Result, _Location, _State) ->
   ?d({report, _MFA}),
   ok.
